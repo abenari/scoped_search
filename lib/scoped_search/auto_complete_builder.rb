@@ -1,16 +1,8 @@
 module ScopedSearch
 
-
-  LOGICAL_INFIX_OPERATORS  = ScopedSearch::QueryLanguage::Parser::LOGICAL_INFIX_OPERATORS
-  LOGICAL_PREFIX_OPERATORS = ScopedSearch::QueryLanguage::Parser::LOGICAL_PREFIX_OPERATORS
-  NULL_PREFIX_OPERATORS    = ScopedSearch::QueryLanguage::Parser::NULL_PREFIX_OPERATORS
-  NULL_PREFIX_COMPLETER    = ['has']
-  COMPARISON_OPERATORS     = ScopedSearch::QueryLanguage::Parser::COMPARISON_OPERATORS
-  PREFIX_OPERATORS         = LOGICAL_PREFIX_OPERATORS + NULL_PREFIX_OPERATORS
-
-  # The AutoCompleteBuilder class builds suggestions to complete query based on
+  # The AutoCompleter class builds suggestions to complete query based on
   # the query language syntax.
-  class AutoCompleteBuilder
+  class AutoCompleter
 
     attr_reader :ast, :definition, :query, :tokens
 
@@ -19,7 +11,12 @@ module ScopedSearch
     def self.auto_complete(definition, query)
       return [] if (query.nil? or definition.nil? or !definition.respond_to?(:fields))
 
-      new(definition, query).build_autocomplete_options
+      completer = new(definition, query)
+      # First parse to find illegal syntax in the existing query,
+      # this method will throw exception on bad syntax.
+      completer.is_query_valid
+
+      completer.build_autocomplete_options
     end
 
     # Initializes the instance by setting the relevant parameters
@@ -28,13 +25,11 @@ module ScopedSearch
       @ast        = ScopedSearch::QueryLanguage::Compiler.parse(query)
       @query      = query
       @tokens     = tokenize
+      @prefix_operators = @logical_prefix_operators + @null_prefix_operators
     end
 
     # Test the validity of the current query and suggest possible completion
     def build_autocomplete_options
-      # First parse to find illegal syntax in the existing query,
-      # this method will throw exception on bad syntax.
-      is_query_valid
 
       # get the completion options
       node = last_node
@@ -42,8 +37,8 @@ module ScopedSearch
 
       suggestions = []
       suggestions += complete_keyword        if completion.include?(:keyword)
-      suggestions += LOGICAL_INFIX_OPERATORS if completion.include?(:logical_op)
-      suggestions += LOGICAL_PREFIX_OPERATORS + NULL_PREFIX_COMPLETER if completion.include?(:prefix_op)
+      suggestions += @logical_infix_operators if completion.include?(:logical_op)
+      suggestions += @prefix_completer if completion.include?(:prefix_op)
       suggestions += complete_operator(node) if completion.include?(:infix_op)
       suggestions += complete_value          if completion.include?(:value)
 
@@ -56,14 +51,14 @@ module ScopedSearch
       return [:keyword] + [:prefix_op] if tokens.empty?
 
       #prefix operator
-      return [:keyword] if last_token_is(PREFIX_OPERATORS)
+      return [:keyword] if last_token_is(@prefix_operators)
 
       # left hand
       if is_left_hand(node)
-        if (tokens.size == 1 || last_token_is(PREFIX_OPERATORS + LOGICAL_INFIX_OPERATORS) ||
-            last_token_is(PREFIX_OPERATORS + LOGICAL_INFIX_OPERATORS, 2))
+        if (tokens.size == 1 || last_token_is(@prefix_operators + @logical_infix_operators) ||
+            last_token_is(@prefix_operators + @logical_infix_operators, 2))
           options = [:keyword]
-          options += [:prefix_op]  unless last_token_is(PREFIX_OPERATORS)
+          options += [:prefix_op]  unless last_token_is(@prefix_operators)
         else
           options = [:logical_op]
         end
@@ -82,23 +77,22 @@ module ScopedSearch
     # Test the validity of the existing query, this method will throw exception on illegal
     # query syntax.
     def is_query_valid
-      # skip test for null prefix operators if in the process of completing the field name.
-      return if(last_token_is(NULL_PREFIX_OPERATORS, 2) && !(query =~ /(\s|\)|,)$/))
-      QueryBuilder.build_query(definition, query)
+      # should be implemented by inheritor
+      raise ("Error, is query valid not implemented.")
     end
 
     def is_left_hand(node)
       field = definition.field_by_name(node.value)
       lh = field.nil? || field.key_field && !(query.end_with?(' '))
-      lh = lh || last_token_is(NULL_PREFIX_OPERATORS, 2)
+      lh = lh || last_token_is(@null_prefix_operators, 2)
       lh = lh && !is_right_hand
       lh
     end
 
     def is_right_hand
-      rh = last_token_is(COMPARISON_OPERATORS)
+      rh = last_token_is(@comparison_operators)
       if(tokens.size > 1 && !(query.end_with?(' ')))
-        rh = rh || last_token_is(COMPARISON_OPERATORS, 2)
+        rh = rh || last_token_is(@comparison_operators, 2)
       end
       rh
     end
@@ -174,7 +168,7 @@ module ScopedSearch
 
     # this method auto-completes values of fields that have a :complete_value marker 
     def complete_value
-      if last_token_is(COMPARISON_OPERATORS)
+      if last_token_is(@comparison_operators)
         token = tokens[tokens.size-2]
         val = ''
       else
@@ -245,7 +239,50 @@ module ScopedSearch
 
   end
 
+  class SqlAutoCompleter < AutoCompleter
+
+    # Initializes the instance by setting the relevant parameters
+    def initialize(definition, query)
+      @logical_infix_operators  = ScopedSearch::QueryLanguage::Parser::LOGICAL_INFIX_OPERATORS
+      @logical_prefix_operators = ScopedSearch::QueryLanguage::Parser::LOGICAL_PREFIX_OPERATORS
+      @null_prefix_operators    = ScopedSearch::QueryLanguage::Parser::NULL_PREFIX_OPERATORS
+      @comparison_operators     = ScopedSearch::QueryLanguage::Parser::COMPARISON_OPERATORS
+      @prefix_completer         = ['has'] + @logical_prefix_operators
+      super definition, query
+    end
+
+    # Test the validity of the existing query, this method will throw exception on illegal
+    # query syntax.
+    def is_query_valid
+      # skip test for null prefix operators if in the process of completing the field name.
+      return if(last_token_is(@null_prefix_operators, 2) && !(query =~ /(\s|\)|,)$/))
+      QueryBuilder.build_query(definition, query)
+    end
+
+  end
+
+  # The AutoCompleteBuilder class builds suggestions to complete query based on
+  # the query language syntax.
+  class RestAutoCompleter < AutoCompleter
+    # Initializes the instance by setting the relevant parameters
+    def initialize(definition, query)
+      @logical_infix_operators  = [:and]
+      @logical_prefix_operators = []
+      @null_prefix_operators    = []
+      @comparison_operators     = ScopedSearch::QueryLanguage::Parser::COMPARISON_OPERATORS
+      @prefix_completer         = []
+      super definition, query
+    end
+
+    # Test the validity of the existing query, this method will throw exception on illegal
+    # query syntax.
+    def is_query_valid
+      RestQueryBuilder.build_query(definition, query)
+    end
+  end
+
 end
 
 # Load lib files
 require 'scoped_search/query_builder'
+require 'scoped_search/rest_query_builder'

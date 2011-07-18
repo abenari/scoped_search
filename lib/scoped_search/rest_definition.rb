@@ -1,57 +1,36 @@
 module ScopedSearch
 
-  # The ScopedSearch definition class defines on what fields should be search
+  # The ScopedSearch rest-definition class defines on what fields should be search
   # in the model in what cases
   #
-  # A definition can be created by calling the <tt>scoped_search</tt> method on
-  # an ActiveRecord-based class, so you should not create an instance of this
+  # A definition can be created by calling the <tt>rest_search</tt> method on
+  # an ActiveResource-based class, so you should not create an instance of this
   # class yourself.
-  class Definition
+  class RestDefinition
 
     # The Field class specifies a field of a model that is available for searching,
     # in what cases this field should be searched and its default search behavior.
     #
-    # Instances of this class are created when calling scoped_search in your model
+    # Instances of this class are created when calling rest_search in your model
     # class, so you should not create instances of this class yourself.
     class Field
 
-      attr_reader :definition, :field, :only_explicit, :relation, :key_relation,
-                  :key_field, :complete_value, :offset, :word_size, :ext_method, :operators
+      attr_reader :definition, :field, :key_field, :only_explicit, :complete_value, :ext_method, :operators, :field_type
 
       # The ActiveRecord-based class that belongs to this field.
       def klass
-        if relation
-          related = definition.klass.reflections[relation]
-          raise ScopedSearch::QueryNotSupported, "relation '#{relation}' not one of #{definition.klass.reflections.keys.join(', ')} " if related.nil?
-          related.klass
-        else
-          definition.klass
-        end
-      end
-      # The ActiveRecord-based class that belongs the key field in a key-value pair.
-      def key_klass
-         if key_relation
-          definition.klass.reflections[key_relation].klass
-        elsif relation
-          definition.klass.reflections[relation].klass
-        else
-          definition.klass
-        end
-      end
-
-      # Returns the ActiveRecord column definition that corresponds to this field.
-      def column
-        klass.columns_hash[field.to_s]
+        definition.klass
       end
 
       # Returns the column type of this field.
       def type
-        column.type
+        return field_type if field_type
+        :string
       end
 
       # Returns true if this field is a datetime-like column
       def datetime?
-        [:datetime, :time, :timestamp].include?(type)
+        [:time, :timestamp].include?(type)
       end
 
       # Returns true if this field is a date-like column
@@ -67,7 +46,7 @@ module ScopedSearch
       # Returns true if this field is numerical.
       # Numerical means either integer, floating point or fixed point.
       def numerical?
-        [:integer, :double, :float, :decimal].include?(type)
+        [:integer, :float, :decimal].include?(type)
       end
 
       # Returns true if this is a textual column.
@@ -103,7 +82,6 @@ module ScopedSearch
       # scoped_search call on the ActiveRecord-based model class.
       def initialize(definition, options = {})
         @definition = definition
-        @definition.profile = options[:profile] if options[:profile]
         @definition.default_order ||= default_order(options)
 
         case options
@@ -114,15 +92,11 @@ module ScopedSearch
 
           # Set attributes from options hash
           @complete_value   = options[:complete_value]
-          @relation         = options[:in]
-          @key_relation     = options[:in_key]
-          @key_field        = options[:on_key]
-          @offset           = options[:offset]
-          @word_size        = options[:word_size] || 1
           @ext_method       = options[:ext_method]
           @operators        = options[:operators]
           @only_explicit    = !!options[:only_explicit]
           @default_operator = options[:default_operator] if options.has_key?(:default_operator)
+          @field_type       = options[:field_type] if [:string, :text, :integer, :float, :decimal, :date, :time, :timestamp].include?(options[:field_type])
         end
 
         # Store this field is the field array
@@ -138,9 +112,9 @@ module ScopedSearch
 
     attr_reader :klass
 
-    # Initializes a ScopedSearch definition instance.
-    # This method will also setup a database adapter and create the :search_for
-    # named scope if it does not yet exist.
+    # Initializes a ScopedSearch Rest-definition instance.
+    # This method will also create the :search_for and :complete_for
+    # if it does not yet exist.
     def initialize(klass)
       @klass                 = klass
       @fields                = {}
@@ -149,13 +123,13 @@ module ScopedSearch
       @profile_unique_fields = {:default => []}
 
 
-      register_named_scope! unless klass.respond_to?(:search_for)
+      register_search_for! unless klass.respond_to?(:search_for)
       register_complete_for! unless klass.respond_to?(:complete_for)
 
     end
-   
+
     attr_accessor :profile, :default_order
-    
+
     def fields
       @profile ||= :default
       @profile_fields[@profile] ||= {}
@@ -224,39 +198,28 @@ module ScopedSearch
 
     protected
 
-    # Registers the search_for named scope within the class that is used for searching.
-    def register_named_scope! # :nodoc
-      if @klass.ancestors.include?(ActiveRecord::Base)
-        case ActiveRecord::VERSION::MAJOR
-        when 2
-          @klass.named_scope(:search_for, lambda { |*args| ScopedSearch::QueryBuilder.build_query(self, args[0], args[1]) })
-        when 3
-          @klass.scope(:search_for, lambda { |*args| 
-            find_options = ScopedSearch::QueryBuilder.build_query(self, args[0], args[1]) 
-            search_scope = @klass.scoped
-            search_scope = search_scope.where(find_options[:conditions]) if find_options[:conditions]
-            search_scope = search_scope.includes(find_options[:include]) if find_options[:include]
-            search_scope = search_scope.joins(find_options[:joins]) if find_options[:joins]
-            search_scope = search_scope.order(find_options[:order]) if find_options[:order]
-            search_scope = search_scope.group(find_options[:group]) if find_options[:group]
-            search_scope
-          })
-        else
-          raise "This ActiveRecord version is currently not supported!"
+    # Registers the search_for within the class that is used for searching.
+    def register_search_for! # :nodoc
+      if @klass.ancestors.include?(ActiveResource::Base)
+        @klass.class_eval do
+          def self.search_for (query)
+            search_options = ScopedSearch::RestQueryBuilder.build_query(@rest_search, query)
+            search_options
+          end
         end
       else
-        raise "Currently, only ActiveRecord 2.1 or higher is supported!"
+        raise "Class #{klass} is not an ActiveResource derivative!"
       end
     end
   end
 end
 
 # Registers the complete_for method within the class that is used for searching.
- def register_complete_for! # :nodoc
-@klass.class_eval do
-  def self.complete_for (query)
-    search_options = ScopedSearch::SqlCompleter.auto_complete(@scoped_search , query)
-    search_options
+def register_complete_for! # :nodoc
+  @klass.class_eval do
+    def self.complete_for (query)
+      search_options = ScopedSearch::RestAutoCompleter.auto_complete(@rest_search , query)
+      search_options
     end
   end
- end
+end

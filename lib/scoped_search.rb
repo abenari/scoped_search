@@ -19,7 +19,7 @@ module ScopedSearch
   # The ClassMethods module will be included into the ActiveRecord::Base class
   # to add the <tt>ActiveRecord::Base.scoped_search</tt> method and the
   # <tt>ActiveRecord::Base.search_for</tt> named scope.
-  module ClassMethods
+  module ActiveRecordClassMethods
 
     # Export the scoped_search method fo defining the search options.
     # This method will create a definition instance for the class if it does not yet exist,
@@ -34,6 +34,23 @@ module ScopedSearch
         end
       end
       return @scoped_search
+    end
+  end
+
+  module ActiveResourceClassMethods
+    # Export the rest_search method to defining the search options.
+    # This method will create a definition instance for the class if it does not yet exist,
+    # and use the object as block argument and return value.
+    def rest_search(*definitions)
+      @rest_search ||= ScopedSearch::RestDefinition.new(self)
+      definitions.each do |definition|
+        if definition[:on].kind_of?(Array)
+          definition[:on].each { |field| @rest_search.define(definition.merge(:on => field)) }
+        else
+          @rest_search.define(definition)
+        end
+      end
+      return @rest_search
     end
   end
 
@@ -85,13 +102,18 @@ end
 
 # Load all lib files
 require 'scoped_search/definition'
+require 'scoped_search/rest_definition'
 require 'scoped_search/query_language'
 require 'scoped_search/query_builder'
 require 'scoped_search/auto_complete_builder'
 
-# Import the search_on method in the ActiveReocrd::Base class
-ActiveRecord::Base.send(:extend, ScopedSearch::ClassMethods)
+# Import the search_on method in the ActiveRecord::Base class
+ActiveRecord::Base.send(:extend, ScopedSearch::ActiveRecordClassMethods)
 ActiveRecord::Base.send(:extend, ScopedSearch::BackwardsCompatibility)
+
+if defined?(ActiveResource)
+ ActiveResource::Base.send(:extend, ScopedSearch::ActiveResourceClassMethods)
+end
 
 if defined?(ActionController)
   require "scoped_search/rails_helper"
